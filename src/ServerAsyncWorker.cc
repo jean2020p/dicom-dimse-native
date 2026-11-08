@@ -147,6 +147,13 @@ void ServerAsyncWorker::Execute(const ExecutionProgress &progress)
       DcmQueryRetrieveSCP scp(cfg, options, factory, associationConfiguration);
       while (cond.good()) {
           cond = scp.waitForAssociation(net);
+          /* In multi-process mode (default on platforms with fork()) every
+           * association is handled by a forked child. Reap the children that
+           * have finished, otherwise they stay as zombies in the process table
+           * and countChildProcesses() eventually reaches maxAssociations,
+           * refusing every new association with TooManyAssociations.
+           * (dcmqrscp does the same in its main loop.) */
+          scp.cleanChildren();
       }
   }
     
