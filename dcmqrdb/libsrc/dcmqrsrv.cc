@@ -1147,7 +1147,25 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
             try
             {
                 std::thread([this, assoc, correctUIDPadding]() {
-                    this->handleAssociation(assoc, correctUIDPadding);
+                    /* An exception escaping a std::thread calls std::terminate and
+                     * would kill the whole Node.js process (with fork() it only
+                     * killed the child). Contain it to this association. */
+                    T_ASC_Association *a = assoc;
+                    try {
+                        this->handleAssociation(a, correctUIDPadding);
+                    }
+                    catch (const std::exception& e) {
+                        DCMQRDB_ERROR("Association thread failed: " << e.what() << " (aborting association)");
+                        ASC_abortAssociation(a);
+                        ASC_dropAssociation(a);
+                        ASC_destroyAssociation(&a);
+                    }
+                    catch (...) {
+                        DCMQRDB_ERROR("Association thread failed: unknown exception (aborting association)");
+                        ASC_abortAssociation(a);
+                        ASC_dropAssociation(a);
+                        ASC_destroyAssociation(&a);
+                    }
                     --activeAssociations_;
                 }).detach();
             }
