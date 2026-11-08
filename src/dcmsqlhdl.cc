@@ -158,6 +158,10 @@ DcmQueryRetrieveSQLiteDatabaseHandlePrivate::~DcmQueryRetrieveSQLiteDatabaseHand
     DB_FreeElementList(handle->findResponseList);
     delete handle;
     handle = NULL;
+    /* close the SQLite connection of this association (was leaked; harmless
+     * with fork() since the child exits, but one fd per association with threads) */
+    delete db;
+    db = NULL;
 }
 
 //------------------------------------------------------------------------------------------------------

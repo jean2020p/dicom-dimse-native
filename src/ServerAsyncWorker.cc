@@ -139,6 +139,11 @@ void ServerAsyncWorker::Execute(const ExecutionProgress &progress)
       options.maxAssociations_ = 128;
       options.correctUIDPadding_ = true;
       options.maxPDU_ = ASC_DEFAULTMAXPDU;
+      /* Never fork() inside the Node.js process: forking a multi-threaded process
+       * can leave the child blocked on a lock held by another thread, and the child
+       * inherits Node's pipes (child_process.execSync then waits forever).
+       * Each association is handled in its own thread instead. */
+      options.singleProcess_ = OFTrue;
       options.networkTransferSyntax_ = netTransPrefer.getXfer();
       options.networkTransferSyntaxOut_ = netTransPropose.getXfer();
       options.writeTransferSyntax_ = writeTrans.getXfer();

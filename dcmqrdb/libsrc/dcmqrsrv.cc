@@ -33,6 +33,8 @@
 
 #include <thread>
 #include <future>
+#include <chrono>
+#include <system_error>
 
 static void findCallback(
   /* in */
@@ -130,12 +132,31 @@ DcmQueryRetrieveSCP::DcmQueryRetrieveSCP(
   const DcmAssociationConfiguration& associationConfiguration)
 : config_(&config)
 , processtable_()
+, activeAssociations_(0)
 , dbCheckFindIdentifier_(OFFalse)
 , dbCheckMoveIdentifier_(OFFalse)
 , factory_(factory)
 , options_(options)
 , associationConfiguration_(associationConfiguration)
 {
+}
+
+DcmQueryRetrieveSCP::~DcmQueryRetrieveSCP()
+{
+    /* Association threads reference this object (and options_/factory_, which
+     * are owned by the caller and outlive it). Do not return while any of them
+     * is still running. Each thread is bounded by the DIMSE/ACSE timeouts. */
+    const auto start = std::chrono::steady_clock::now();
+    bool warned = false;
+    while (activeAssociations_.load() > 0)
+    {
+        if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(5))
+        {
+            DCMQRDB_WARN("waiting for " << activeAssociations_.load() << " association thread(s) to finish");
+            warned = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 
@@ -990,10 +1011,11 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
 #ifdef HAVE_FORK
     int                 pid;
 #endif
-    T_ASC_Association  *assoc;
+    T_ASC_Association  *assoc = NULL;
     char                buf[BUFSIZ];
     int timeout;
     OFBool go_cleanup = OFFalse;
+    OFBool handedOff = OFFalse;    /* single-process mode: association passed to a thread */
 
     if (options_.singleProcess_) timeout = 1000;
     else
@@ -1077,7 +1099,11 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
     if (! go_cleanup)
     {
         // too many concurrent associations ??
-        if (processtable_.countChildProcesses() >= OFstatic_cast(size_t, options_.maxAssociations_))
+        // single-process mode: running threads; multi-process mode: child processes
+        const size_t currentAssociations = options_.singleProcess_
+            ? activeAssociations_.load()
+            : processtable_.countChildProcesses();
+        if (currentAssociations >= OFstatic_cast(size_t, options_.maxAssociations_))
         {
             cond = refuseAssociation(&assoc, CTN_TooManyAssociations);
             go_cleanup = OFTrue;
@@ -1109,8 +1135,28 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
 
         if (options_.singleProcess_)
         {
-            /* don't spawn a sub-process to handle the association */
-            std::async(std::launch::async, &DcmQueryRetrieveSCP::handleAssociation, this, assoc, options_.correctUIDPadding_);
+            /* don't spawn a sub-process: handle the association in its own thread.
+             * The thread owns 'assoc' (handleAssociation drops and destroys it).
+             * In single-process mode the cleanup block below does NOT touch
+             * 'assoc', so it is never freed while the thread is using it.
+             * (The previous std::async call discarded its future, whose
+             * destructor blocked, so associations were in fact serialized.) */
+            const OFBool correctUIDPadding = options_.correctUIDPadding_;
+            handedOff = OFTrue;
+            ++activeAssociations_;
+            try
+            {
+                std::thread([this, assoc, correctUIDPadding]() {
+                    this->handleAssociation(assoc, correctUIDPadding);
+                    --activeAssociations_;
+                }).detach();
+            }
+            catch (const std::system_error& e)
+            {
+                DCMQRDB_ERROR("Cannot create association thread (" << e.what() << "), handling association synchronously");
+                handleAssociation(assoc, correctUIDPadding);
+                --activeAssociations_;
+            }
         }
 #ifdef HAVE_FORK
         else
@@ -1142,9 +1188,11 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
 
     // cleanup code
     OFCondition oldcond = cond;    /* store condition flag for later use */
-    if (!options_.singleProcess_ && (cond != ASC_SHUTDOWNAPPLICATION))
+    /* multi-process mode: the child handles the association, the parent drops its copy.
+     * single-process mode: only clean up if the association was NOT handed to a
+     * thread (receive/negotiation/acknowledge failed); otherwise the thread owns it. */
+    if ((!options_.singleProcess_ || !handedOff) && (cond != ASC_SHUTDOWNAPPLICATION))
     {
-        /* the child will handle the association, we can drop it */
         cond = ASC_dropAssociation(assoc);
         if (cond.bad())
         {
