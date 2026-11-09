@@ -28,11 +28,13 @@ const PORT = opt('port', '11200');
 const EXEC_MS = opt('exec', '0');
 const LABEL = opt('label', `exec${EXEC_MS}`);
 const STRICT = args.includes('--strict');
+const SCU = opt('scu', 'lib');                    // 'lib' (this library) or 'dcmtk' (echoscu/storescu tools)
 const WIN = process.platform === 'win32';
 const RUN = path.join(os.tmpdir(), `dimse-stress-${LABEL}-${PORT}`);
 const STATS = path.join(RUN, 'stats.json');
+const CLIENT_DIR = path.join(RUN, 'clients');      // SCU processes write their dicom.log here
 fs.rmSync(RUN, { recursive: true, force: true });
-fs.mkdirSync(RUN, { recursive: true });
+fs.mkdirSync(CLIENT_DIR, { recursive: true });
 
 const lines = [];
 const log = (s) => { const l = `[${LABEL}] ${s}`; console.log(l); lines.push(l); };
@@ -68,7 +70,8 @@ function procInfo() {
 }
 function client(a) {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [path.join(__dirname, 'client.js'), LIB, ...a], { windowsHide: true });
+    const p = spawn(process.execPath, [path.join(__dirname, 'client.js'), LIB, ...a],
+      { windowsHide: true, cwd: CLIENT_DIR, env: { ...process.env, STRESS_SCU: SCU } });
     let out = ''; p.stdout.on('data', (d) => (out += d));
     p.on('exit', () => {
       let r;
@@ -85,10 +88,10 @@ function sql(query) {
   return sh(WIN ? 'python' : 'python3', ['-c', py, path.join(RUN, 'storage', 'image.db'), query]);
 }
 const JOIN = 'from image i join series s on i.referenceId=s.id join study t on s.referenceId=t.id join patient p on t.referenceId=p.id';
-function topLogErrors(n) {
+function topLogErrors(n, dir = RUN) {
   const counts = {};
-  for (const f of fs.readdirSync(RUN).filter((f) => /^dicom\.log/.test(f))) {
-    for (const l of fs.readFileSync(path.join(RUN, f), 'utf8').split(/\r?\n/)) {
+  for (const f of fs.readdirSync(dir).filter((f) => /^dicom\.log/.test(f))) {
+    for (const l of fs.readFileSync(path.join(dir, f), 'utf8').split(/\r?\n/)) {
       if (!/^(ERROR|FATAL)/.test(l) || /state 1 event 7/.test(l)) continue;
       const k = l.replace(/\[[^\]]*\]/g, '').replace(/[0-9]+\.[0-9.]{10,}/g, 'UID').replace(/\/[^ :]+/g, 'PATH').trim().slice(0, 160);
       counts[k] = (counts[k] || 0) + 1;
@@ -167,7 +170,8 @@ function logCount(re) {
     `charset ${R.charset ? 'ok' : 'FAIL'} | alive ${R.alive} | frozen ${R.frozen} | TooMany ${R.log.tooMany} | crash ${R.log.crash} | ` +
     `start ${JSON.stringify(R.start)} end ${JSON.stringify(R.end)}` + (fails.length ? ` | problems: ${fails.join('; ')}` : '') +
     (clientErrors.length ? ` | client errors: ${clientErrors.join(' || ')}` : '') +
-    (fails.length ? ` | server log: ${topLogErrors(5).join(' || ') || '(no ERROR lines)'}` : '');
+    (fails.length ? ` | server log: ${topLogErrors(5).join(' || ') || '(no ERROR lines)'}` : '') +
+    (fails.length ? ` | client log: ${topLogErrors(5, CLIENT_DIR).join(' || ') || '(no ERROR lines)'}` : '');
   console.log(`::${R.pass ? 'notice' : (STRICT ? 'error' : 'warning')} title=${LABEL} ${process.platform}-${process.arch}::${summary}`);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${LABEL} (${process.platform}/${process.arch})\n\n\`\`\`\n${lines.join('\n')}\n\`\`\`\n\n**${R.pass ? 'PASS' : 'FAIL'}** ${fails.join('; ')}\n\n`);
   fs.writeFileSync(path.join(RUN, 'result.json'), JSON.stringify(R, null, 1));
