@@ -923,7 +923,14 @@ OFCondition DcmQueryRetrieveSQLiteDatabaseHandle::storeRequest(const char* SOPCl
      * Report it as a database error for this instance instead of letting the
      * exception escape: with association threads it would terminate the process. */
     try {
-        return d->db->insertMetaData(dcmff.getDataset(), imageFileName);
+        OFCondition cond = d->db->insertMetaData(dcmff.getDataset(), imageFileName);
+        if (cond.bad()) {
+            /* the image was not indexed: do not answer "Success" to the modality
+             * (it would never resend it and the study would be invisible) */
+            DCMNET_ERROR("DB: image not indexed: " << imageFileName);
+            status->setStatus(STATUS_STORE_Refused_OutOfResources);
+        }
+        return cond;
     }
     catch (const std::exception& e) {
         DCMNET_ERROR("DB: storeRequest failed for " << imageFileName << ": " << e.what());
