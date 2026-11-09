@@ -53,7 +53,7 @@ function loop() {
     return 'ok';
   } catch (_) { return '?'; }
 }
-function sh(cmd, a) { try { return execFileSync(cmd, a, { encoding: 'utf8', windowsHide: true }).trim(); } catch (_) { return ''; } }
+function sh(cmd, a) { try { return execFileSync(cmd, a, { encoding: 'utf8', windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' } }).trim(); } catch (_) { return ''; } }
 function procInfo() {
   if (exited) return {};
   if (WIN) {
@@ -70,15 +70,32 @@ function client(a) {
   return new Promise((resolve) => {
     const p = spawn(process.execPath, [path.join(__dirname, 'client.js'), LIB, ...a], { windowsHide: true });
     let out = ''; p.stdout.on('data', (d) => (out += d));
-    p.on('exit', () => { try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch (_) { resolve({ ok: 0, f: 1 }); } });
+    p.on('exit', () => {
+      let r;
+      try { r = JSON.parse(out.trim().split('\n').pop()); } catch (_) { r = { ok: 0, f: 1, err: `client crashed: ${out.slice(-200)}` }; }
+      if (r.err && clientErrors.length < 3 && !clientErrors.includes(r.err)) clientErrors.push(r.err);
+      resolve(r);
+    });
   });
 }
+const clientErrors = [];
 const sum = (rs) => rs.reduce((t, r) => ({ ok: t.ok + r.ok, f: t.f + r.f }), { ok: 0, f: 0 });
 function sql(query) {
   const py = `import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\ntry:\n  print(c.execute(sys.argv[2]).fetchone()[0])\nexcept Exception as e:\n  print('ERR:'+str(e)[:80])`;
   return sh(WIN ? 'python' : 'python3', ['-c', py, path.join(RUN, 'storage', 'image.db'), query]);
 }
 const JOIN = 'from image i join series s on i.referenceId=s.id join study t on s.referenceId=t.id join patient p on t.referenceId=p.id';
+function topLogErrors(n) {
+  const counts = {};
+  for (const f of fs.readdirSync(RUN).filter((f) => /^dicom\.log/.test(f))) {
+    for (const l of fs.readFileSync(path.join(RUN, f), 'utf8').split(/\r?\n/)) {
+      if (!/^(ERROR|FATAL)/.test(l) || /state 1 event 7/.test(l)) continue;
+      const k = l.replace(/\[[^\]]*\]/g, '').replace(/[0-9]+\.[0-9.]{10,}/g, 'UID').replace(/\/[^ :]+/g, 'PATH').trim().slice(0, 160);
+      counts[k] = (counts[k] || 0) + 1;
+    }
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, c]) => `${c}x ${k}`);
+}
 function logCount(re) {
   let n = 0;
   for (const f of fs.readdirSync(RUN).filter((f) => /^dicom\.log/.test(f))) n += (fs.readFileSync(path.join(RUN, f), 'utf8').match(re) || []).length;
@@ -148,7 +165,9 @@ function logCount(re) {
   const summary = `${LABEL} on ${process.platform}/${process.arch}: ${R.pass ? 'PASS' : 'FAIL'} | ` +
     `F2 ${R.f2.ok}/90 indexed ${R.f2.indexed}/150 | F2b ${R.f2b.ok}/30 | F3 ${R.f3.ok}/100 | F1 ${R.f1.ok}/300 | F5 ${R.f5.ok}/20 | ` +
     `charset ${R.charset ? 'ok' : 'FAIL'} | alive ${R.alive} | frozen ${R.frozen} | TooMany ${R.log.tooMany} | crash ${R.log.crash} | ` +
-    `start ${JSON.stringify(R.start)} end ${JSON.stringify(R.end)}` + (fails.length ? ` | problems: ${fails.join('; ')}` : '');
+    `start ${JSON.stringify(R.start)} end ${JSON.stringify(R.end)}` + (fails.length ? ` | problems: ${fails.join('; ')}` : '') +
+    (clientErrors.length ? ` | client errors: ${clientErrors.join(' || ')}` : '') +
+    (fails.length ? ` | server log: ${topLogErrors(5).join(' || ') || '(no ERROR lines)'}` : '');
   console.log(`::${R.pass ? 'notice' : (STRICT ? 'error' : 'warning')} title=${LABEL} ${process.platform}-${process.arch}::${summary}`);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${LABEL} (${process.platform}/${process.arch})\n\n\`\`\`\n${lines.join('\n')}\n\`\`\`\n\n**${R.pass ? 'PASS' : 'FAIL'}** ${fails.join('; ')}\n\n`);
   fs.writeFileSync(path.join(RUN, 'result.json'), JSON.stringify(R, null, 1));
