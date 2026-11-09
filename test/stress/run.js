@@ -105,10 +105,60 @@ function logCount(re) {
   return n;
 }
 
+// --soak N: N C-ECHO (10 SCU processes, 4 concurrent each) while 30 SCUs store 10x their
+// own 5 images (300 associations), then check for leaks. Replaces the normal phases.
+async function soak(total) {
+  const watch = setInterval(loop, 1000);                 // catches event-loop freezes during the load
+  const t0 = Date.now();
+  const [echo, store] = await Promise.all([
+    Promise.all(Array.from({ length: 10 }, () => client(['echo', PORT, String(total / 10), '4']))).then(sum),
+    Promise.all(Array.from({ length: 30 }, (_, j) => client(['store', PORT, path.join(SAMPLES, 'unique', `c${j + 1}`), '10']))).then(sum),
+  ]);
+  clearInterval(watch);
+  const secs = Math.round((Date.now() - t0) / 1000);
+  const indexed = Number(sql(`select count(*) ${JOIN} where p.PatientName like 'TESTE^CLIENTE%'`)) || 0;
+  log(`SOAK ${total} C-ECHO + 300 C-STORE associations in ${secs}s: echo ok=${echo.ok} fail=${echo.f} | store ok=${store.ok} fail=${store.f} indexed=${indexed}/150 | alive=${alive()} loop=${loop()}`);
+  await sleep(8000);
+  const after = await client(['echo', PORT, '20', '1']);
+  const end = procInfo();
+  log(`after 8s idle: 20 C-ECHO ok=${after.ok} | start ${JSON.stringify(R.start)} end ${JSON.stringify(end)}`);
+  const errOut = fs.readFileSync(path.join(RUN, 'server.err'), 'utf8') + fs.readFileSync(path.join(RUN, 'server.out'), 'utf8');
+  const tooMany = logCount(/TooManyAssociations/g);
+  const crash = (errOut.match(/terminate called|Segmentation fault|Abort trap|double free|pointer being freed|FATAL ERROR/gi) || []).length;
+  let stats = {}; try { stats = JSON.parse(fs.readFileSync(STATS, 'utf8')); } catch (_) {}
+  srv.kill();
+  await sleep(1000);
+  const grow = WIN ? (end.handles - R.start.handles) : (end.fds - R.start.fds);
+  const fails = [];
+  if (!R.alive) fails.push('process died');
+  if (R.frozen) fails.push('event loop frozen');
+  if (echo.ok !== total) fails.push(`echo ${echo.ok}/${total}`);
+  if (store.ok !== 300 || indexed !== 150) fails.push(`store ${store.ok}/300 indexed ${indexed}/150`);
+  if (after.ok !== 20) fails.push(`after-load echo ${after.ok}/20`);
+  if (tooMany) fails.push(`TooManyAssociations=${tooMany}`);
+  if (crash) fails.push('crash message');
+  if (end.zombies) fails.push(`zombies=${end.zombies}`);
+  if (grow > (WIN ? 50 : 15)) fails.push(`${WIN ? 'handles' : 'fds'} grew by ${grow}`);
+  if (Number(EXEC_MS) > 0 && (stats.exec_fail || stats.exec_wrong_status)) fails.push('child_process errors');
+  const pass = fails.length === 0;
+  const summary = `${LABEL} on ${process.platform}/${process.arch}: ${pass ? 'PASS' : 'FAIL'} | ${total} echo ok ${echo.ok} | ` +
+    `300 store ok ${store.ok} indexed ${indexed}/150 | ${secs}s | ${WIN ? 'handles' : 'fds'} ${WIN ? R.start.handles : R.start.fds}->${WIN ? end.handles : end.fds} | ` +
+    `rss ${stats.rss_mb_start}->${stats.rss_mb} MB | exec_ok ${stats.exec_ok || 0} | alive ${R.alive} | frozen ${R.frozen} | TooMany ${tooMany} | crash ${crash}` +
+    (fails.length ? ` | problems: ${fails.join('; ')}` : '') +
+    (fails.length && clientErrors.length ? ` | client errors: ${clientErrors.join(' || ')}` : '') +
+    (fails.length ? ` | server log: ${topLogErrors(5).join(' || ') || '(no ERROR lines)'}` : '');
+  console.log(`::${pass ? 'notice' : (STRICT ? 'error' : 'warning')} title=${LABEL} ${process.platform}-${process.arch}::${summary}`);
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${LABEL} (${process.platform}/${process.arch})\n\n\`\`\`\n${lines.join('\n')}\n\`\`\`\n\n**${pass ? 'PASS' : 'FAIL'}** ${fails.join('; ')}\n\n`);
+  if (process.env.STRESS_ARTIFACT_DIR) fs.cpSync(RUN, path.join(process.env.STRESS_ARTIFACT_DIR, path.basename(RUN)), { recursive: true });
+  process.exit(STRICT && !pass ? 1 : 0);
+}
+
 (async () => {
   await sleep(4000);
   R.start = procInfo();
   log(`start pid=${srv.pid} alive=${alive()} loop=${loop()} ${JSON.stringify(R.start)}`);
+  const SOAK = Number(opt('soak', '0'));
+  if (SOAK > 0) return soak(SOAK);
 
   let s = { ok: 0, f: 0 };
   for (let i = 0; i < 3; i++) {

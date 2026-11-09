@@ -84,6 +84,13 @@ jobs:
           STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
         run: node harness/test/stress/run.js --lib lib --samples samples --port 11202 --exec 100 --label ${{ matrix.variant }}-exec100 ${{ matrix.variant == 'fix' && '--strict' || '' }}
 
+      - name: Soak - 10,000 C-ECHO + 300 C-STORE associations, leak check (fix only)
+        if: always() && matrix.variant == 'fix'
+        shell: bash
+        env:
+          STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
+        run: node harness/test/stress/run.js --lib lib --samples samples --port 11204 --exec 100 --soak 10000 --label fix-soak10k --strict
+
       - name: Install DCMTK command line tools (independent SCU)
         if: always() && runner.os != 'Windows'
         shell: bash
