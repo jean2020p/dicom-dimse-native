@@ -1,0 +1,83 @@
+name: SCP stress test
+
+# Builds the native addon from source and stresses startStoreScp on Linux, macOS
+# (Apple Silicon) and Windows: concurrent C-STORE/C-ECHO, >128 associations,
+# aborted connections, child_process activity in the SCP process, charset.
+# 'fix' = this branch (strict: must pass); 'baseline' = upstream v2.4.6 (for comparison).
+
+on:
+  push:
+    branches: [ 'fix/**' ]
+  workflow_dispatch:
+
+jobs:
+  stress:
+    name: ${{ matrix.os }} / ${{ matrix.variant }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-22.04, macos-14, macos-15, windows-2022 ]
+        variant: [ fix, baseline ]
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+    steps:
+      - name: Checkout this branch (test harness + fix)
+        uses: actions/checkout@v4
+        with:
+          path: harness
+
+      - name: Checkout upstream v2.4.6 (baseline)
+        if: matrix.variant == 'baseline'
+        uses: actions/checkout@v4
+        with:
+          repository: knopkem/dicom-dimse-native
+          ref: v2.4.6
+          path: lib
+
+      - name: Use this branch as library (fix)
+        if: matrix.variant == 'fix'
+        shell: bash
+        run: cp -R harness lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install JS dependencies (no install scripts, no prebuilt binary)
+        working-directory: lib
+        shell: bash
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Build native addon from source
+        working-directory: lib
+        shell: bash
+        run: npx cmake-js compile --CDDCMTK_ENABLE_BUILTIN_OFICONV_DATA=ON --CDCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Generate synthetic DICOM samples
+        shell: bash
+        run: node harness/test/stress/gen_samples.js samples
+
+      - name: Stress (no child_process activity)
+        shell: bash
+        env:
+          STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
+        run: node harness/test/stress/run.js --lib lib --samples samples --port 11201 --exec 0 --label ${{ matrix.variant }}-exec0 ${{ matrix.variant == 'fix' && '--strict' || '' }}
+
+      - name: Stress (execSync/spawnSync every 100 ms in the SCP process)
+        if: always()
+        shell: bash
+        env:
+          STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
+        run: node harness/test/stress/run.js --lib lib --samples samples --port 11202 --exec 100 --label ${{ matrix.variant }}-exec100 ${{ matrix.variant == 'fix' && '--strict' || '' }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-${{ matrix.os }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/stress-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
