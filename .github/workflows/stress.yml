@@ -73,6 +73,20 @@ jobs:
           STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
         run: node harness/test/stress/run.js --lib lib --samples samples --port 11202 --exec 100 --label ${{ matrix.variant }}-exec100 ${{ matrix.variant == 'fix' && '--strict' || '' }}
 
+      - name: Install DCMTK command line tools (independent SCU)
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install dcmtk; else sudo apt-get update -qq && sudo apt-get install -y -qq dcmtk; fi
+          storescu --version | head -1
+
+      - name: Stress with DCMTK echoscu/storescu as SCU (execSync every 100 ms)
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        env:
+          STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
+        run: node harness/test/stress/run.js --lib lib --samples samples --port 11203 --exec 100 --scu dcmtk --label ${{ matrix.variant }}-dcmtkscu-exec100 ${{ matrix.variant == 'fix' && '--strict' || '' }}
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

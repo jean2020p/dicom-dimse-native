@@ -4,11 +4,11 @@
 'use strict';
 const path = require('path');
 const [libDir, mode, port, a, b] = process.argv.slice(2);
-const { echoScu, storeScu } = require(path.resolve(libDir, 'index.js'));
+let { echoScu, storeScu } = require(path.resolve(libDir, 'index.js'));
 const source = { aet: 'STRESS_SCU', ip: '127.0.0.1', port: 9999 }; // not listened on; 0 is rejected
 const target = { aet: 'PACS_TESTE', ip: '127.0.0.1', port: Number(port) };
 
-let firstError = null;
+var firstError = null;
 function once(fn, opts) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => { firstError = firstError || 'timeout (60 s)'; resolve(false); }, 60000);
@@ -20,6 +20,23 @@ function once(fn, opts) {
       resolve(r.code === 0);
     });
   });
+}
+
+// STRESS_SCU=dcmtk: use the DCMTK command line tools (echoscu/storescu) as SCU instead of this library
+if (process.env.STRESS_SCU === 'dcmtk') {
+  const { spawn } = require('child_process');
+  const fs = require('fs');
+  const run = (cmd, a) => new Promise((resolve) => {
+    const p = spawn(cmd, a); let err = '';
+    p.stderr.on('data', (d) => (err += d)); p.stdout.on('data', (d) => (err += d));
+    const t = setTimeout(() => p.kill(), 60000);
+    p.on('error', (e) => { clearTimeout(t); firstError = firstError || String(e.message); resolve(false); });
+    p.on('exit', (code) => { clearTimeout(t); if (code !== 0 && !firstError) firstError = `${cmd} exit ${code}: ${err.trim().split('\n').pop()}`; resolve(code === 0); });
+  });
+  const base = ['-aet', source.aet, '-aec', target.aet, target.ip, String(target.port)];
+  echoScu = (o, cb) => run('echoscu', base).then((ok) => cb(JSON.stringify({ code: ok ? 0 : 2 })));
+  storeScu = (o, cb) => run('storescu', [...base, ...fs.readdirSync(o.sourcePath).map((f) => path.join(o.sourcePath, f))])
+    .then((ok) => cb(JSON.stringify({ code: ok ? 0 : 2 })));
 }
 
 (async () => {
