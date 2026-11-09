@@ -35,6 +35,57 @@
 #include <future>
 #include <chrono>
 #include <system_error>
+#include <functional>
+#include <memory>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
+#include <pthread.h>
+#endif
+
+/* Stack size for association threads. std::thread cannot set it and the
+ * platform defaults differ a lot (macOS: 512 KB for secondary threads,
+ * Windows: 1 MB, Linux: 8 MB). Association handling (DIMSE, dataset parsing,
+ * codecs) used to run in a forked process with the main-thread stack, so give
+ * the threads the same generous size on every platform. */
+static const size_t ASSOCIATION_THREAD_STACK_SIZE = 8 * 1024 * 1024;
+
+#ifdef _WIN32
+static unsigned __stdcall associationThreadEntry(void *arg)
+#else
+static void *associationThreadEntry(void *arg)
+#endif
+{
+    std::unique_ptr<std::function<void()> > fn(OFstatic_cast(std::function<void()> *, arg));
+    (*fn)();
+    return 0;
+}
+
+/** start a detached thread with ASSOCIATION_THREAD_STACK_SIZE.
+ *  @return true if the thread was started (it then owns 'fn')
+ */
+static bool startAssociationThread(std::function<void()> fn)
+{
+    std::function<void()> *arg = new std::function<void()>(std::move(fn));
+#ifdef _WIN32
+    uintptr_t h = _beginthreadex(NULL, OFstatic_cast(unsigned, ASSOCIATION_THREAD_STACK_SIZE),
+        associationThreadEntry, arg, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (h == 0) { delete arg; return false; }
+    CloseHandle(OFreinterpret_cast(HANDLE, h));
+    return true;
+#else
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) { delete arg; return false; }
+    pthread_attr_setstacksize(&attr, ASSOCIATION_THREAD_STACK_SIZE);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    const int rc = pthread_create(&tid, &attr, associationThreadEntry, arg);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) { delete arg; return false; }
+    return true;
+#endif
+}
 
 static void findCallback(
   /* in */
@@ -1144,9 +1195,7 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
             const OFBool correctUIDPadding = options_.correctUIDPadding_;
             handedOff = OFTrue;
             ++activeAssociations_;
-            try
-            {
-                std::thread([this, assoc, correctUIDPadding]() {
+            const bool started = startAssociationThread([this, assoc, correctUIDPadding]() {
                     /* An exception escaping a std::thread calls std::terminate and
                      * would kill the whole Node.js process (with fork() it only
                      * killed the child). Contain it to this association. */
@@ -1167,11 +1216,10 @@ OFCondition DcmQueryRetrieveSCP::waitForAssociation(T_ASC_Network * theNet)
                         ASC_destroyAssociation(&a);
                     }
                     --activeAssociations_;
-                }).detach();
-            }
-            catch (const std::system_error& e)
+                });
+            if (!started)
             {
-                DCMQRDB_ERROR("Cannot create association thread (" << e.what() << "), handling association synchronously");
+                DCMQRDB_ERROR("Cannot create association thread, handling association synchronously");
                 handleAssociation(assoc, correctUIDPadding);
                 --activeAssociations_;
             }
