@@ -42,6 +42,17 @@ jobs:
         shell: bash
         run: cp -R harness lib
 
+      # GitHub macOS runners have a 68-char host name; DCMTK SCUs refuse local host
+      # names longer than 62 chars ("cannot initialize network"). Use a short one.
+      - name: Short host name (macOS runners)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          sudo scutil --set HostName dimse-stress
+          sudo scutil --set LocalHostName dimse-stress
+          sudo scutil --set ComputerName dimse-stress
+          hostname
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
