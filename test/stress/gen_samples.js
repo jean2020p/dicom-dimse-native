@@ -7,6 +7,7 @@
 //   <outDir>/unique/c1..c30/img1..5.dcm  30 "modalities", each with its own patient/study/series
 //   <outDir>/dup/img1..5.dcm             one set that all clients send at the same time (stress)
 //   <outDir>/charset/acento.dcm          ISO_IR 100 patient name "JOSÉ^CONCEIÇÃO"
+//   <outDir>/mass/c1..c500/img1..10.dcm  5,000 distinct instances for the soak test
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -88,6 +89,18 @@ function series(dir, tag, name, id, charset) {
   }
 }
 for (let c = 1; c <= 30; c++) series(path.join(out, 'unique', `c${c}`), c, `TESTE^CLIENTE${c}`, `TESTE${c}`);
+// mass/c1..c500: 500 patients/studies x 10 images = 5,000 distinct instances (soak test)
+for (let c = 1; c <= 500; c++) {
+  const dir = path.join(out, 'mass', `c${c}`);
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 1; i <= 10; i++) {
+    fs.writeFileSync(path.join(dir, `img${i}.dcm`), dicomFile({
+      sopUid: `${base}.${1000 + c}.1.${i}`, studyUid: `${base}.${1000 + c}.2`, seriesUid: `${base}.${1000 + c}.3`,
+      patientName: `TESTE^MASSA${c}`, patientId: `MASSA${c}`, instance: i,
+    }));
+    n++;
+  }
+}
 series(path.join(out, 'dup'), 99, 'TESTE^CARGA', 'TESTE001');
 fs.mkdirSync(path.join(out, 'charset'), { recursive: true });
 fs.writeFileSync(path.join(out, 'charset', 'acento.dcm'), dicomFile({

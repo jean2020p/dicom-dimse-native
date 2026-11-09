@@ -105,19 +105,23 @@ function logCount(re) {
   return n;
 }
 
-// --soak N: N C-ECHO (10 SCU processes, 4 concurrent each) while 30 SCUs store 10x their
-// own 5 images (300 associations), then check for leaks. Replaces the normal phases.
+// --soak N: N C-ECHO (10 SCU processes, 4 concurrent each) while 50 SCUs store 5,000 distinct
+// images (500 patients x 10 images, one association per patient), then check that every image
+// is on disk and indexed, and that no fds/handles leaked. Replaces the normal phases.
 async function soak(total) {
   const watch = setInterval(loop, 1000);                 // catches event-loop freezes during the load
   const t0 = Date.now();
   const [echo, store] = await Promise.all([
     Promise.all(Array.from({ length: 10 }, () => client(['echo', PORT, String(total / 10), '4']))).then(sum),
-    Promise.all(Array.from({ length: 30 }, (_, j) => client(['store', PORT, path.join(SAMPLES, 'unique', `c${j + 1}`), '10']))).then(sum),
+    Promise.all(Array.from({ length: 50 }, (_, j) => client(['storerange', PORT, path.join(SAMPLES, 'mass'), `${j * 10 + 1}-${j * 10 + 10}`]))).then(sum),
   ]);
   clearInterval(watch);
   const secs = Math.round((Date.now() - t0) / 1000);
-  const indexed = Number(sql(`select count(*) ${JOIN} where p.PatientName like 'TESTE^CLIENTE%'`)) || 0;
-  log(`SOAK ${total} C-ECHO + 300 C-STORE associations in ${secs}s: echo ok=${echo.ok} fail=${echo.f} | store ok=${store.ok} fail=${store.f} indexed=${indexed}/150 | alive=${alive()} loop=${loop()}`);
+  const indexed = Number(sql(`select count(*) ${JOIN} where p.PatientName like 'TESTE^MASSA%'`)) || 0;
+  const countFiles = (d) => fs.readdirSync(d, { withFileTypes: true })
+    .reduce((n, e) => n + (e.isDirectory() ? countFiles(path.join(d, e.name)) : (/^image\.db/.test(e.name) ? 0 : 1)), 0);
+  const onDisk = countFiles(path.join(RUN, 'storage'));
+  log(`SOAK ${total} C-ECHO + 500 C-STORE associations (5,000 images) in ${secs}s: echo ok=${echo.ok} fail=${echo.f} | store ok=${store.ok}/500 fail=${store.f} files=${onDisk}/5000 indexed=${indexed}/5000 | alive=${alive()} loop=${loop()}`);
   await sleep(8000);
   const after = await client(['echo', PORT, '20', '1']);
   const end = procInfo();
@@ -133,7 +137,7 @@ async function soak(total) {
   if (!R.alive) fails.push('process died');
   if (R.frozen) fails.push('event loop frozen');
   if (echo.ok !== total) fails.push(`echo ${echo.ok}/${total}`);
-  if (store.ok !== 300 || indexed !== 150) fails.push(`store ${store.ok}/300 indexed ${indexed}/150`);
+  if (store.ok !== 500 || onDisk !== 5000 || indexed !== 5000) fails.push(`store ${store.ok}/500 files ${onDisk}/5000 indexed ${indexed}/5000`);
   if (after.ok !== 20) fails.push(`after-load echo ${after.ok}/20`);
   if (tooMany) fails.push(`TooManyAssociations=${tooMany}`);
   if (crash) fails.push('crash message');
@@ -142,7 +146,7 @@ async function soak(total) {
   if (Number(EXEC_MS) > 0 && (stats.exec_fail || stats.exec_wrong_status)) fails.push('child_process errors');
   const pass = fails.length === 0;
   const summary = `${LABEL} on ${process.platform}/${process.arch}: ${pass ? 'PASS' : 'FAIL'} | ${total} echo ok ${echo.ok} | ` +
-    `300 store ok ${store.ok} indexed ${indexed}/150 | ${secs}s | ${WIN ? 'handles' : 'fds'} ${WIN ? R.start.handles : R.start.fds}->${WIN ? end.handles : end.fds} | ` +
+    `500 store assoc ok ${store.ok} | 5000 images: files ${onDisk} indexed ${indexed} | ${secs}s | ${WIN ? 'handles' : 'fds'} ${WIN ? R.start.handles : R.start.fds}->${WIN ? end.handles : end.fds} | ` +
     `rss ${stats.rss_mb_start}->${stats.rss_mb} MB | exec_ok ${stats.exec_ok || 0} | alive ${R.alive} | frozen ${R.frozen} | TooMany ${tooMany} | crash ${crash}` +
     (fails.length ? ` | problems: ${fails.join('; ')}` : '') +
     (fails.length && clientErrors.length ? ` | client errors: ${clientErrors.join(' || ')}` : '') +

@@ -3,7 +3,7 @@ name: SCP stress test
 # Builds the native addon from source and stresses startStoreScp on Linux, macOS
 # (Apple Silicon) and Windows: concurrent C-STORE/C-ECHO, >128 associations,
 # aborted connections, child_process activity in the SCP process, charset.
-# 'fix' = this branch (strict: must pass); 'baseline' = upstream v2.4.6 (for comparison).
+# 'fix' = this branch (strict: must pass); 'baseline' = upstream master (for comparison).
 
 on:
   push:
@@ -29,12 +29,12 @@ jobs:
         with:
           path: harness
 
-      - name: Checkout upstream v2.4.6 (baseline)
+      - name: Checkout upstream master (baseline)
         if: matrix.variant == 'baseline'
         uses: actions/checkout@v4
         with:
           repository: knopkem/dicom-dimse-native
-          ref: v2.4.6
+          ref: master
           path: lib
 
       - name: Use this branch as library (fix)
@@ -84,7 +84,7 @@ jobs:
           STRESS_ARTIFACT_DIR: ${{ runner.temp }}/stress-artifacts
         run: node harness/test/stress/run.js --lib lib --samples samples --port 11202 --exec 100 --label ${{ matrix.variant }}-exec100 ${{ matrix.variant == 'fix' && '--strict' || '' }}
 
-      - name: Soak - 10,000 C-ECHO + 300 C-STORE associations, leak check (fix only)
+      - name: Soak - 10,000 C-ECHO + 5,000 images (500 C-STORE associations), leak check (fix only)
         if: always() && matrix.variant == 'fix'
         shell: bash
         env:

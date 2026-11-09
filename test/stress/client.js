@@ -1,6 +1,7 @@
 // client.js — DICOM SCU using this library's echoScu/storeScu. Prints one JSON line {ok, f}.
 //   node client.js <libDir> echo  <port> <count> <concurrency>
 //   node client.js <libDir> store <port> <dicomDir> <repeats>
+//   node client.js <libDir> storerange <port> <parentDir> <from>-<to>
 'use strict';
 const path = require('path');
 const [libDir, mode, port, a, b] = process.argv.slice(2);
@@ -46,6 +47,10 @@ if (process.env.STRESS_SCU === 'dcmtk') {
     let started = 0;
     const worker = async () => { while (started < total) { started++; (await once(echoScu, { source, target })) ? ok++ : f++; } };
     await Promise.all(Array.from({ length: conc }, worker));
+  } else if (mode === 'storerange') {
+    // storerange <port> <parentDir> <from>-<to>: one association per folder c<from>..c<to>
+    const [from, to] = b.split('-').map(Number);
+    for (let c = from; c <= to; c++) (await once(storeScu, { source, target, sourcePath: path.resolve(a, `c${c}`) })) ? ok++ : f++;
   } else {
     for (let i = 0; i < Number(b); i++) (await once(storeScu, { source, target, sourcePath: path.resolve(a) })) ? ok++ : f++;
   }
